@@ -1,0 +1,179 @@
+name: Performance Testing
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  # JMeter configuration
+  JMETER_VERSION: "5.6.3"
+
+jobs:
+  performance-test:
+    name: Run Performance Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Allow pushing commits to perf-history
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'corretto'
+
+      - name: Build application
+        run: |
+          echo "Building application..."
+          chmod +x ./mvnw
+          ./mvnw clean package -DskipTests
+          echo "Application built successfully"
+
+      - name: Build threshold checker
+        run: |
+          echo "Building threshold checker..."
+          cd perf-checker
+          ../mvnw clean package
+          echo "Threshold checker built successfully"
+
+      - name: Install JMeter
+        run: |
+          echo "Downloading JMeter ${JMETER_VERSION}..."
+          wget --progress=dot:giga https://dlcdn.apache.org/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz
+          tar -xzf apache-jmeter-${JMETER_VERSION}.tgz
+          sudo mv apache-jmeter-${JMETER_VERSION} /opt/jmeter
+          echo "JMeter installed to /opt/jmeter"
+          /opt/jmeter/bin/jmeter --version
+
+      - name: Install JMeter Custom Thread Groups plugin
+        run: |
+          echo "Downloading Custom Thread Groups plugin..."
+          wget --progress=dot:giga https://jmeter-plugins.org/files/packages/jpgc-casutg-3.1.1.zip
+          echo "Extracting plugin..."
+          unzip -q jpgc-casutg-3.1.1.zip
+          echo "Installing plugin to JMeter..."
+          sudo cp lib/ext/jmeter-plugins-casutg-3.1.1.jar /opt/jmeter/lib/ext/
+          echo "Custom Thread Groups plugin installed successfully"
+          ls -lh /opt/jmeter/lib/ext/jmeter-plugins-casutg-3.1.1.jar
+
+      - name: Install JMeter Weighted Switch Controller plugin
+        run: |
+          echo "Downloading Weighted Switch Controller plugin..."
+          wget --progress=dot:giga https://jmeter-plugins.org/files/packages/jpgc-wsc-0.7.zip
+          echo "Extracting plugin..."
+          unzip -q jpgc-wsc-0.7.zip
+          echo "Installing plugin to JMeter..."
+          sudo cp lib/ext/jmeter-plugins-wsc-0.7.jar /opt/jmeter/lib/ext/
+          echo "Weighted Switch Controller plugin installed successfully"
+          ls -lh /opt/jmeter/lib/ext/jmeter-plugins-wsc-0.7.jar
+
+      - name: Run performance tests
+        id: run-tests
+        run: |
+          echo "Running performance tests..."
+          cd jmeter/scripts
+          chmod +x run-test.sh
+
+          # Set environment variables for the script
+          export APP_JAR="../../target/employee-management-api-1.0-SNAPSHOT.jar"
+          export JMETER_HOME="/opt/jmeter"
+          export TEST_PLAN="../test-script.jmx"
+          export JMETER_PROPS="../github.properties"
+
+          # Run the test
+          ./run-test.sh
+
+          # Save timestamp for later steps
+          TIMESTAMP=$(date +%Y-%m-%d-%H%M%S)
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+
+      - name: Check performance thresholds
+        id: check-thresholds
+        run: |
+          echo "Checking performance thresholds..."
+
+          # Find the most recent results directory
+          RESULTS_DIR=$(ls -td perf-results/*/ | head -1)
+          STATISTICS_FILE="${RESULTS_DIR}report/statistics.json"
+
+          if [ ! -f "$STATISTICS_FILE" ]; then
+            echo "ERROR: statistics.json not found at $STATISTICS_FILE"
+            exit 1
+          fi
+
+          # Run threshold checker with properties file
+          java -jar perf-checker/target/threshold-checker.jar "$STATISTICS_FILE" jmeter/thresholds.properties | tee threshold-check-output.txt
+
+          # Capture exit code
+          THRESHOLD_EXIT_CODE=${PIPESTATUS[0]}
+
+          # Save output for artifacts
+          cp threshold-check-output.txt "$RESULTS_DIR/threshold-check.txt"
+
+          exit $THRESHOLD_EXIT_CODE
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-test-results-${{ steps.run-tests.outputs.timestamp }}
+          path: |
+            perf-results/**/results.jtl
+            perf-results/**/report/
+            perf-results/**/threshold-check.txt
+            perf-results/**/app.log
+          retention-days: 90
+
+      - name: Commit results to history
+        if: always()
+        run: |
+          # Configure git
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+          # Find the most recent results directory
+          RESULTS_DIR=$(ls -td perf-results/*/ | head -1)
+          TIMESTAMP=$(basename "$RESULTS_DIR")
+
+          # Create perf-history directory for this run
+          HISTORY_DIR="perf-history/${TIMESTAMP}"
+          mkdir -p "$HISTORY_DIR"
+
+          # Copy key files to history
+          cp "${RESULTS_DIR}results.jtl" "$HISTORY_DIR/"
+          cp "${RESULTS_DIR}report/statistics.json" "$HISTORY_DIR/"
+          cp "${RESULTS_DIR}threshold-check.txt" "$HISTORY_DIR/summary.txt" 2>/dev/null || echo "No threshold check output" > "$HISTORY_DIR/summary.txt"
+
+          # Create metadata file
+          cat > "$HISTORY_DIR/metadata.txt" << EOF
+          Commit: ${{ github.sha }}
+          Branch: ${{ github.ref_name }}
+          Timestamp: ${TIMESTAMP}
+          Workflow: ${{ github.workflow }}
+          Run ID: ${{ github.run_id }}
+          Run Number: ${{ github.run_number }}
+          EOF
+
+          # Commit and push
+          git add perf-history/
+          git commit -m "chore: performance test results for ${{ github.sha }}" || echo "No changes to commit"
+          git push || echo "Failed to push results (this is non-fatal)"
+
+      - name: Fail if thresholds exceeded
+        if: failure() && steps.check-thresholds.outcome == 'failure'
+        run: |
+          echo "========================================="
+          echo "❌ Performance Regression Detected!"
+          echo "========================================="
+          echo ""
+          echo "One or more performance thresholds were exceeded."
+          echo "Please review the test results and threshold check output."
+          echo ""
+          echo "Artifacts have been uploaded with detailed results."
+          echo "Check the 'Artifacts' section of this workflow run."
+          echo ""
+          exit 1

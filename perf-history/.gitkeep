@@ -1,0 +1,3 @@
+# This directory stores historical performance test results
+# Results are committed automatically by the CI/CD workflow
+# Each subdirectory is named with a timestamp: YYYY-MM-DD-HHmmss
