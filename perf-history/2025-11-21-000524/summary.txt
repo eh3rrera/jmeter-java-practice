@@ -1,0 +1,17 @@
+Loaded thresholds from: jmeter/thresholds.properties
+
+========== Performance Threshold Check ==========
+Configuration:
+  Max Median Response Time: 260.0ms
+  Max Error Rate: 1.0%
+  Min Throughput: 19.0 req/sec
+  Max P90 Response Time: 18000.0ms
+
+Results:
+✓ Error rate: 0.00% (threshold: 1.0%)
+✓ Throughput: 21.69 req/sec (threshold: 19.0 req/sec)
+✓ Median response time: 242.00ms (threshold: 260.0ms)
+✓ P90 response time: 16753.80ms (threshold: 18000.0ms)
+=================================================
+
+✅ All performance thresholds passed!
